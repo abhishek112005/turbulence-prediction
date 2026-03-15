@@ -12,6 +12,7 @@ __pycache__/
 .venv/
 venv/
 env/
+turb_pred/config/settings.py
 
 # Node
 node_modules/
