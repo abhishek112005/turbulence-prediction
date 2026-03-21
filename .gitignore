@@ -30,3 +30,9 @@ npm-debug.log*
 
 # Local misc
 *.log
+
+# additional files
+*.diagrams
+phase-1changes.txt
+SLIDE7_IMPLEMENTATION.md
+PROJECT_OVERVIEW.txt
