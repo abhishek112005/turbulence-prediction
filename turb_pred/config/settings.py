@@ -1,8 +1,10 @@
 import os
 
 # OpenSky API credentials
-CLIENT_ID = os.getenv("CLIENT_ID", "abhishekpothanagari@gmail.com-api-client")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "ado7IxewwJDcHa4hsTUdjxQC8RgkPoVt")
+CLIENT_ID = os.getenv("CLIENT_ID", "mdjohnpaulreddy-api-client")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "7jOxtFGc01ZHvwMe32w16fZLBIdB0o1N")
+AVIATIONSTACK_ACCESS_KEY = os.getenv("AVIATIONSTACK_ACCESS_KEY", "fc057cefd03851bb282926d8ea5d2761")
+AVIATIONSTACK_BASE_URL = os.getenv("AVIATIONSTACK_BASE_URL", "https://api.aviationstack.com/v1")
 
 # PostgreSQL settings
 DB_NAME = os.getenv("DB_NAME", "planes")

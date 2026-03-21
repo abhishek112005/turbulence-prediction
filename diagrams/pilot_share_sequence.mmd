@@ -1,0 +1,15 @@
+sequenceDiagram
+  participant PilotUI as Pilot Dashboard (React)
+  participant API as FastAPI (:8000)
+  participant DB as Postgres
+  participant PassengerUI as Passenger Dashboard (React)
+
+  PilotUI->>API: POST /api/pilot/assign-flight {pilot_email, icao24}
+  API->>DB: UPSERT pilot_flight_assignments
+  API-->>PilotUI: assignment saved + selected flight payload
+
+  PassengerUI->>API: GET /api/pilot/shared-flights (poll)
+  API->>DB: read pilot_flight_assignments
+  API->>DB: cached pipeline read (no OpenSky live fetch)
+  API-->>PassengerUI: sharedFlights[]
+

@@ -1,6 +1,22 @@
 import { Link } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
+
+function roleToPath(role) {
+  if (role === "passenger") {
+    return "/passenger";
+  }
+  if (role === "pilot") {
+    return "/pilot";
+  }
+  if (role === "admin") {
+    return "/admin";
+  }
+  return "/";
+}
 
 function Landing() {
+  const { isAuthenticated, user } = useAuth();
+
   return (
     <>
       <section className="hero">
@@ -27,14 +43,22 @@ function Landing() {
       </section>
 
       <section className="panel">
-        <h2>Start</h2>
+        <h2>{isAuthenticated ? "Continue" : "Start"}</h2>
         <div className="toolbar">
-          <Link className="action-btn" to="/signup">
-            Signup with Role
-          </Link>
-          <Link className="action-btn muted" to="/login">
-            Login
-          </Link>
+          {isAuthenticated ? (
+            <Link className="action-btn" to={roleToPath(user?.role)}>
+              Go to Dashboard
+            </Link>
+          ) : (
+            <>
+              <Link className="action-btn" to="/signup">
+                Signup with Role
+              </Link>
+              <Link className="action-btn muted" to="/login">
+                Login
+              </Link>
+            </>
+          )}
         </div>
       </section>
     </>

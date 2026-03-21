@@ -1,0 +1,336 @@
+FULL PROJECT FLOW (End-to-End)
+Repo: c:\Abhishek\SUMMER-INTERNSHIP
+Generated: 2026-03-15
+
+================================================================================
+0) What this repo contains
+================================================================================
+This is a full-stack “live flight turbulence monitor”.
+
+Two runnable apps:
+1) Frontend UI (React + Vite): /frontend
+2) Backend API (Python + FastAPI): /turb_pred
+
+High-level loop:
+- Backend fetches aircraft telemetry (OpenSky) -> stores in Postgres -> runs ML models
+  -> stores predictions -> serves REST APIs + WebSocket alerts.
+- Frontend shows role-based dashboards: Passenger / Pilot / Admin.
+
+
+================================================================================
+1) Project structure (top-level folders)
+================================================================================
+/
+  frontend/                 React + Vite UI (runs on port 3000 in dev)
+  turb_pred/                FastAPI backend + ML pipeline + DB helpers (runs on port 8000)
+  PROJECT_OVERVIEW.txt      Simplified overview (human notes)
+  process.txt               Team progress notes
+
+
+================================================================================
+2) Where the project “starts” (entry points)
+================================================================================
+FRONTEND ENTRY (browser):
+- frontend/index.html
+  - Contains <div id="root"></div>
+  - Loads frontend/src/main.jsx
+
+- frontend/src/main.jsx
+  - Boots React:
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />)
+  - Sets Leaflet marker icon URLs (fixes missing icons in Vite bundles)
+  - Imports global CSS: frontend/src/styles.css
+
+- frontend/src/App.jsx
+  - Defines routing with react-router-dom
+  - Wraps all routes inside <AuthProvider> (frontend/src/context/AuthContext.jsx)
+  - Routes:
+      /            Landing
+      /signup      Signup (Google)
+      /login       Login (Google)
+      /passenger   PassengerDashboard (protected)
+      /pilot       PilotDashboard (protected)
+      /admin       AdminDashboard (protected)
+
+
+BACKEND ENTRY (server):
+- turb_pred/api/pipeline_api.py
+  - Creates FastAPI app:
+      app = FastAPI(title="Turbulence Pipeline API")
+  - Adds CORS middleware (currently allows all origins)
+  - Includes additional router from turb_pred/communication/websocket_routes.py
+  - Defines all REST endpoints + room WebSocket endpoint
+  - If frontend build exists (frontend/dist), serves the SPA from the backend:
+      GET / -> dist/index.html
+      GET /{any} -> dist/index.html (except /api/*, /ws/*, /assets/*)
+
+
+================================================================================
+3) How to run (local dev)
+================================================================================
+Backend:
+  cd turb_pred
+  pip install -r requirements.txt
+  uvicorn api.pipeline_api:app --reload --host 127.0.0.1 --port 8000
+
+Frontend:
+  cd frontend
+  npm install
+  npm run dev
+  (Vite serves http://localhost:3000)
+
+Frontend env:
+  frontend/.env
+    - VITE_API_BASE_URL (example: http://127.0.0.1:8000)
+    - VITE_GOOGLE_CLIENT_ID (Google OAuth Client ID for the button)
+
+Backend env/config:
+  turb_pred/config/settings.py reads environment variables for:
+    - OpenSky (CLIENT_ID, CLIENT_SECRET)
+    - AviationStack (AVIATIONSTACK_ACCESS_KEY, AVIATIONSTACK_BASE_URL)
+    - Postgres (DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT)
+
+
+================================================================================
+4) Data + prediction pipeline (backend internal flow)
+================================================================================
+The live pipeline is implemented inside turb_pred/api/pipeline_api.py and uses helpers.
+
+4.1 Telemetry ingest
+- OpenSky calls are done via opensky_get(...)
+  - It first gets an access token (client_credentials) from:
+      turb_pred/api/auth.py -> get_access_token()
+  - It then calls OpenSky endpoints using requests.get with Authorization: Bearer <token>
+
+- Telemetry is stored into Postgres table planes_table by:
+    turb_pred/database/insert_planes.py -> insert_planes(planes)
+
+There are two ways telemetry can be ingested:
+A) API-driven (on demand)
+   - run_live_pipeline(fetch_live=True) calls fetch_and_store_live_states()
+B) Continuous background script (manual)
+   - turb_pred/api/live_fetch.py loops every 60 seconds:
+       fetch OpenSky -> insert into planes_table
+
+4.2 Fetch recent telemetry from DB
+- Latest global batch: fetch_latest_batch(limit=5000) queries planes_table ordered by fetched_at desc.
+- For one aircraft: fetch_recent_rows_for_icao24(icao24, limit=200)
+
+4.3 Cleaning + inference features
+- Cleaning removes:
+  - on_ground aircraft
+  - rows missing critical telemetry
+  Implemented in turb_pred/preprocessing/clean_data.py -> clean_dataframe(df)
+
+- Inference features are computed in the API:
+  - abs vertical rate
+  - speed/altitude ratio, altitude_km
+  - time deltas per icao24
+  - accelerations and rolling std features
+  Implemented in turb_pred/api/pipeline_api.py -> build_inference_features(df)
+
+4.4 Model inference
+- Models are loaded from:
+  - turb_pred/turbulence_model.pkl (current)
+  - turb_pred/future_turbulence_model.pkl (future)
+- The pipeline predicts:
+  - current turbulence level
+  - future turbulence level + probabilities (if model supports predict_proba)
+
+4.5 Store predictions in DB
+- Insert into predictions table:
+  turb_pred/predictions/predict_live.py -> insert_predictions(...)
+
+4.6 (Optional) Auto-alert logic
+- The pipeline can generate an alert payload if probability crosses a threshold.
+- Alert persistence + optional broadcast:
+  turb_pred/communication/alerts.py
+    - ensure_alerts_table(): creates alerts table if missing
+    - dispatch_alert(payload): stores to alerts table and (optionally) broadcasts globally
+
+
+================================================================================
+5) Backend API surface (what the frontend calls)
+================================================================================
+Core pipeline:
+- POST /api/pipeline/run-live
+  - Runs the global pipeline and returns dashboard payload:
+    { summary, turbulenceSplit, futureRisk, flights, source, fetchedAt }
+
+- POST /api/pipeline/flight/{icao24}/live
+  - Returns payload for a single aircraft:
+    { flight, fetchedAt, source, summary }
+  - Uses cached DB pipeline by default (fetch_live=False) and may fall back
+    to a direct state fetch + history if the aircraft is missing.
+
+Pilot + Passenger linking:
+- POST /api/pilot/assign-flight
+  - Stores which flight a pilot is “sharing” (maps pilot_email -> icao24).
+  - Creates pilot_flight_assignments table if missing.
+
+- GET /api/pilot/assign-flight/{pilot_email}
+  - Returns current pilot assignment (if any).
+
+- GET /api/pilot/shared-flights
+  - Returns the list of all pilot assignments enriched with the latest flight payload.
+  - Important: does NOT call OpenSky live; it uses cached DB pipeline for performance.
+
+QR + onboard passenger page (served by backend via included router):
+- GET /pilot/qr.png?room=<icao24>
+  - Returns PNG QR code pointing to:
+      http://<pilot-device-ip>:8000/passenger?room=<icao24>
+
+- GET /api/pilot/passenger-link?room=<icao24>
+  - Returns { room, url } for the same passenger join URL.
+
+- GET /passenger
+  - A standalone HTML page (mobile-friendly) that connects to the flight room and shows alerts.
+
+WebSocket (room alerts):
+- WS /ws/{room_code}
+  - Room-based WebSocket used by:
+    - frontend PassengerDashboard (useFlightRoom hook)
+    - onboard /passenger HTML page
+
+Broadcast to a room:
+- POST /api/alerts/broadcast/{room_code}
+  - Sends a payload to all sockets in that room (deduplicates repeated levels).
+
+OpenSky helper endpoints (pilot UI uses these for maps/telemetry):
+- GET /api/opensky/flights/departure?airport=...&begin=...&end=...
+- GET /api/opensky/tracks?icao24=...&time=0
+- GET /api/opensky/states/{icao24}
+
+Route/provider endpoints (AviationStack-backed, with caching + rate-limit backoff):
+- GET /api/routes/by-callsign/{callsign}
+- GET /api/routes/live-flights?origin=...&destination=...
+- GET /api/routes/live-options
+  - This endpoint intentionally avoids calling the provider; it relies on cached results.
+
+Admin endpoints:
+- GET /api/admin/users
+  - Requires header: X-User-Email: <admin email>
+  - Reads from users table.
+
+- DELETE /api/admin/users/{email}
+  - Requires admin header; deactivates (or deletes) a user depending on schema.
+
+- GET /api/admin/analytics/turbulence
+  - Requires admin header; builds a grid heatmap using predictions + last known locations.
+
+
+================================================================================
+6) Frontend pages (role-based flows)
+================================================================================
+6.1 Landing
+- frontend/src/pages/Landing.jsx
+  - Shows “Signup” and “Login”, or “Go to Dashboard” if already authenticated.
+
+6.2 Login + Signup (Google OAuth)
+- frontend/src/pages/Login.jsx
+  - Loads Google Identity Services script
+  - On success calls:
+      frontend/src/services/api.js -> authenticateWithGoogle()
+      POST /api/auth/google
+  - Stores result into AuthContext (localStorage)
+
+- frontend/src/pages/Signup.jsx
+  - Picks a role (passenger/pilot/admin) then calls:
+      signupWithGoogle(token, role)
+      POST /api/auth/google-signup
+
+NOTE: the returned “token” is stored client-side but is not currently enforced on most endpoints.
+Admin endpoints enforce admin via the X-User-Email header check.
+
+6.3 Passenger dashboard (main flow)
+- frontend/src/pages/PassengerDashboard.jsx
+  - Every ~15 seconds:
+      GET /api/pilot/shared-flights
+    to list flights shared by pilots.
+  - When a flight (icao24) is selected:
+      POST /api/pipeline/flight/{icao24}/live
+      GET  /api/pilot/passenger-link?room=<icao24>
+  - Opens WebSocket:
+      ws://<host>:8000/ws/<icao24>
+    and renders incoming alert payloads.
+  - Shows QR by requesting:
+      http://<host>:8000/pilot/qr.png?room=<icao24>
+
+6.4 Pilot dashboard
+- frontend/src/pages/PilotDashboard.jsx
+  - Runs the global pipeline to populate flights:
+      POST /api/pipeline/run-live
+  - Can assign the “shared” flight for passengers:
+      POST /api/pilot/assign-flight
+  - Fetches telemetry/track and optional route enrichment:
+      /api/opensky/*, /api/routes/*
+  - Can broadcast alerts to passenger room:
+      POST /api/alerts/broadcast/<room>
+
+6.5 Admin dashboard
+- frontend/src/pages/AdminDashboard.jsx
+  - Runs pipeline for fleet stats:
+      POST /api/pipeline/run-live
+  - Loads users:
+      GET /api/admin/users (X-User-Email header)
+  - Deletes/deactivates users:
+      DELETE /api/admin/users/<email>
+  - Loads analytics heatmap:
+      GET /api/admin/analytics/turbulence
+
+
+================================================================================
+7) Database tables involved (conceptual)
+================================================================================
+1) planes_table
+  - Raw aircraft telemetry snapshots (inserted from OpenSky)
+
+2) predictions
+  - Model outputs per icao24 (inserted by insert_predictions)
+
+3) users
+  - Allowed emails + roles (+ is_active, created_at depending on schema)
+
+4) pilot_flight_assignments
+  - pilot_email -> icao24 mapping (used by /api/pilot/shared-flights)
+
+5) alerts
+  - Alert history saved by dispatch_alert(...)
+
+
+================================================================================
+8) “Start-to-screen” examples (single-request traces)
+================================================================================
+Example A: Passenger sees a selected flight card
+1) PassengerDashboard selects ICAO24
+2) Frontend calls:
+   - POST /api/pipeline/flight/<icao24>/live
+3) Backend does:
+   - run_live_pipeline(fetch_live=False) to use stored DB
+   - selects the matching flight from the payload
+   - returns { flight, fetchedAt, source, summary }
+4) Frontend renders the returned flight data.
+
+Example B: Passenger receives a live alert
+1) PassengerDashboard opens WS /ws/<icao24>
+2) Pilot dashboard (or backend) POSTs /api/alerts/broadcast/<icao24> with JSON payload
+3) Backend broadcasts to room sockets
+4) Frontend hook (useFlightRoom) receives message -> updates AlertBanner + history list.
+
+
+================================================================================
+9) Notes / design intent (why certain files exist)
+================================================================================
+- frontend/src/services/api.js: central place for HTTP calls so pages/components don’t duplicate fetch logic.
+- frontend/src/context/AuthContext.jsx: keeps login state across refresh via localStorage.
+- turb_pred/api/pipeline_api.py: “monolith” server file that owns:
+  - API routes
+  - pipeline execution
+  - model loading
+  - DB queries
+  - room websockets
+  - optional serving of frontend build artifacts
+- turb_pred/communication/websocket_routes.py: extra router for QR and passenger onboard HTML utilities.
+- turb_pred/preprocessing/* and turb_pred/models/*: training/feature engineering scripts;
+  inference uses a feature builder inside pipeline_api to match training expectations.
+

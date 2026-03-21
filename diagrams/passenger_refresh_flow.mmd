@@ -1,0 +1,8 @@
+flowchart TB
+  Start[PassengerDashboard mounts] --> Poll[Every 15s: GET /api/pilot/shared-flights]
+  Poll --> Choose[Select ICAO24]
+  Choose --> Flight[POST /api/pipeline/flight/{icao24}/live]
+  Choose --> Link[GET /api/pilot/passenger-link?room={icao24}]
+  Choose --> WS[WS connect /ws/{icao24}]
+  WS --> Alerts[Show AlertBanner + history]
+

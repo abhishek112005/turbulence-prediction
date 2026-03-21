@@ -1,0 +1,6 @@
+flowchart LR
+  A[OpenSky Telemetry API] --> B[Insert into Postgres: planes_table]
+  B --> C[Cleaning + Feature Engineering]
+  C --> D[ML Inference: current + future models]
+  D --> E[Store predictions: predictions table]
+

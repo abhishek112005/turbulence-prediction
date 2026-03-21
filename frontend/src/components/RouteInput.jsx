@@ -1,25 +1,24 @@
 import { useState } from "react";
-import { findAirportByCity } from "../data/airports";
 
-function RouteInput({ onSearch, busy }) {
-  const [originCity, setOriginCity] = useState("");
-  const [destinationCity, setDestinationCity] = useState("");
+function RouteInput({ onSearch, busy, origins = [], destinations = [] }) {
+  const [originCode, setOriginCode] = useState("");
+  const [destinationCode, setDestinationCode] = useState("");
   const [error, setError] = useState("");
 
   function handleSubmit(event) {
     event.preventDefault();
-    const originAirport = findAirportByCity(originCity);
-    const destinationAirport = findAirportByCity(destinationCity);
+    const originAirport = origins.find((airport) => airport.code === originCode) || null;
+    const destinationAirport = destinations.find((airport) => airport.code === destinationCode) || null;
 
     if (!originAirport || !destinationAirport) {
-      setError("Could not resolve one or both cities. Try major airport cities (ex: Hyderabad, Delhi).");
+      setError("Select both origin and destination from the airport list.");
       return;
     }
 
     setError("");
     onSearch({
-      originCity,
-      destinationCity,
+      originCity: originAirport.city || originAirport.name || "",
+      destinationCity: destinationAirport.city || destinationAirport.name || "",
       originAirport,
       destinationAirport
     });
@@ -31,24 +30,36 @@ function RouteInput({ onSearch, busy }) {
       <label className="field-label" htmlFor="origin-city">
         Origin City
       </label>
-      <input
+      <select
         id="origin-city"
         className="input"
-        value={originCity}
-        onChange={(event) => setOriginCity(event.target.value)}
-        placeholder="ex: Hyderabad"
-      />
+        value={originCode}
+        onChange={(event) => setOriginCode(event.target.value)}
+      >
+        <option value="">{origins.length ? "Select live origin airport" : "No live origins available"}</option>
+        {origins.map((airport) => (
+          <option key={`origin-${airport.code}`} value={airport.code}>
+            {airport.label}
+          </option>
+        ))}
+      </select>
 
       <label className="field-label" htmlFor="destination-city">
         Destination City
       </label>
-      <input
+      <select
         id="destination-city"
         className="input"
-        value={destinationCity}
-        onChange={(event) => setDestinationCity(event.target.value)}
-        placeholder="ex: Delhi"
-      />
+        value={destinationCode}
+        onChange={(event) => setDestinationCode(event.target.value)}
+      >
+        <option value="">{destinations.length ? "Select live destination airport" : "No live destinations available"}</option>
+        {destinations.map((airport) => (
+          <option key={`destination-${airport.code}`} value={airport.code}>
+            {airport.label}
+          </option>
+        ))}
+      </select>
 
       <div className="toolbar">
         <button className="action-btn" type="submit" disabled={busy}>

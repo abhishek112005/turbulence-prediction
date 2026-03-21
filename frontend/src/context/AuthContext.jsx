@@ -1,28 +1,38 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useMemo, useState } from "react";
 
 const AUTH_STORAGE_KEY = "turbulence_auth_v1";
 const AuthContext = createContext(null);
 
-export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [token, setToken] = useState("");
-
-  useEffect(() => {
+function readStoredAuth() {
+  try {
     const raw = localStorage.getItem(AUTH_STORAGE_KEY);
     if (!raw) {
-      return;
+      return { user: null, token: "" };
     }
 
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed?.user) {
-        setUser(parsed.user);
-        setToken(parsed.token || "");
-      }
-    } catch {
-      localStorage.removeItem(AUTH_STORAGE_KEY);
+    const parsed = JSON.parse(raw);
+    if (!parsed?.user) {
+      return { user: null, token: "" };
     }
-  }, []);
+
+    return {
+      user: parsed.user,
+      token: parsed.token || ""
+    };
+  } catch {
+    try {
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    return { user: null, token: "" };
+  }
+}
+
+export function AuthProvider({ children }) {
+  const [storedAuth] = useState(() => readStoredAuth());
+  const [user, setUser] = useState(storedAuth.user);
+  const [token, setToken] = useState(storedAuth.token);
 
   function login(userData) {
     const nextUser = { email: userData.email, role: userData.role };

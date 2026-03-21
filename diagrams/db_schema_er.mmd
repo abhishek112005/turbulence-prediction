@@ -1,0 +1,47 @@
+erDiagram
+  PLANES_TABLE {
+    TEXT icao24
+    TEXT callsign
+    FLOAT longitude
+    FLOAT latitude
+    FLOAT baro_altitude
+    FLOAT velocity
+    FLOAT vertical_rate
+    BOOL on_ground
+    TIMESTAMP fetched_at
+  }
+
+  PREDICTIONS {
+    BIGSERIAL id
+    TEXT icao24
+    INT predicted_turbulence
+    FLOAT confidence
+    TIMESTAMP created_at
+  }
+
+  USERS {
+    TEXT email PK
+    TEXT role
+    BOOL is_active
+    TIMESTAMP created_at
+  }
+
+  PILOT_FLIGHT_ASSIGNMENTS {
+    TEXT pilot_email PK
+    TEXT icao24
+    TEXT callsign
+    TIMESTAMP updated_at
+  }
+
+  ALERTS {
+    BIGSERIAL id
+    TIMESTAMP timestamp
+    TEXT alert_type
+    TEXT severity
+    TEXT message
+    TEXT flight_id
+  }
+
+  USERS ||--o| PILOT_FLIGHT_ASSIGNMENTS : "pilot_email"
+  PLANES_TABLE ||--o{ PREDICTIONS : "icao24"
+

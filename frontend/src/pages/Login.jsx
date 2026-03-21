@@ -96,7 +96,7 @@ function Login() {
   return (
     <section className="panel auth-card">
       <h2>Login</h2>
-      <p>Authenticate with Google. Backend validates token and returns role + JWT.</p>
+      <p>Please login with your google accoount!</p>
 
       {googleClientId ? (
         <div className="google-wrap">

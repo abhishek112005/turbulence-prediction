@@ -1,0 +1,14 @@
+flowchart TB
+  UI[React Frontend<br/>Vite / dist build] -->|REST calls| API[FastAPI Backend<br/>:8000]
+  UI -->|WebSocket| WS[WS /ws/{room}]
+
+  API --> DB[(Postgres)]
+  API --> OS[OpenSky API]
+  API --> AV[AviationStack API]
+
+  API --> M1[Current Model<br/>turbulence_model.pkl]
+  API --> M2[Future Model<br/>future_turbulence_model.pkl]
+
+  WS --> API
+  API -->|broadcast| WS
+

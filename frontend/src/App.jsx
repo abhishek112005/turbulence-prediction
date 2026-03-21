@@ -20,7 +20,7 @@ function AppNavbar() {
   return (
     <header className="app-nav">
       <Link className="brand-link" to="/">
-        AI Turbulence Dashboard
+        Turbulence Prediction Dashboard
       </Link>
 
       <nav className="nav-links">
