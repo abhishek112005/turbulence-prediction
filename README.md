@@ -1,7 +1,7 @@
 # Live Flight Turbulence Monitor (Full-Stack)
 
 **Type:** Minor Project  
-**Author:** abhishesk  
+**Author:** Abhishek 
 
 A full-stack app that fetches live aircraft telemetry (OpenSky), stores it in PostgreSQL, runs ML inference to estimate turbulence risk, and serves results to a React dashboard (Passenger / Pilot / Admin) with real-time WebSocket alerts.
 
