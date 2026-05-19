@@ -6,11 +6,29 @@ import {
 } from "../data/mockData";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  (window.location.port === "3000"
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : window.location.origin);
+
+function getBackendUrl() {
+  const hostname = window.location.hostname;
+  const isNgrok = hostname.includes("ngrok");
+  const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
+  const isPrivateIP = hostname.match(/^192\.168\.|^10\.|^172\.1[6-9]\.|^172\.2[0-9]\.|^172\.3[01]\./) !== null;
+
+  if (isNgrok) {
+    return "";
+  }
+
+  if (isLocalhost) {
+    return "http://localhost:8000";
+  }
+
+  if (isPrivateIP) {
+    return `http://${hostname}:8000`;
+  }
+
+  return window.location.origin;
+}
+
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || getBackendUrl();
 
 export async function getMockDashboardData() {
   await sleep(300);
@@ -25,7 +43,7 @@ export async function getMockDashboardData() {
 }
 
 export async function getLiveDashboardData() {
-  const response = await fetch(`${API_BASE_URL}/api/pipeline/run-live`, {
+  const response = await fetch(`${API_BASE_URL}/api/pipeline/run-live?persist_predictions=false`, {
     method: "POST"
   });
 
@@ -53,6 +71,11 @@ export async function getLiveFlightData(icao24) {
   }
 
   return response.json();
+}
+
+export async function getPirepValidation(icao24, currentLevel) {
+  const qs = currentLevel != null ? `?current_level=${encodeURIComponent(currentLevel)}` : "";
+  return getJson(`${API_BASE_URL}/api/pirep-validate/${encodeURIComponent(icao24)}${qs}`);
 }
 
 export async function authenticateWithGoogle(googleToken) {
@@ -91,22 +114,15 @@ export async function signupWithGoogle(googleToken, role) {
   return response.json();
 }
 
-export async function assignPilotFlight(pilotEmail, icao24) {
-  const response = await fetch(`${API_BASE_URL}/api/pilot/assign-flight`, {
+export async function assignPilotFlight(adminEmail, pilotEmail, icao24) {
+  return requestJson(`${API_BASE_URL}/api/pilot/assign-flight`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      ...adminHeaders(adminEmail)
     },
     body: JSON.stringify({ pilot_email: pilotEmail, icao24 })
   });
-
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    const detail = payload?.detail || `status ${response.status}`;
-    throw new Error(`Pilot flight assignment failed: ${detail}`);
-  }
-
-  return response.json();
 }
 
 export async function getPilotFlightAssignment(pilotEmail) {
@@ -115,8 +131,23 @@ export async function getPilotFlightAssignment(pilotEmail) {
   );
 }
 
-export async function getSharedPilotFlights() {
-  return getJson(`${API_BASE_URL}/api/pilot/shared-flights`);
+export async function getSharedDisplayCurrent() {
+  return getJson(`${API_BASE_URL}/api/shared-display/current`);
+}
+
+export function getSharedDisplayStreamUrl() {
+  return `${API_BASE_URL}/api/shared-display/stream`;
+}
+
+export async function publishSharedDisplayUpdate(pilotEmail, payload) {
+  return requestJson(`${API_BASE_URL}/api/shared-display/publish`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-User-Email": String(pilotEmail || "").trim()
+    },
+    body: JSON.stringify(payload)
+  });
 }
 
 async function getJson(url) {
@@ -179,11 +210,6 @@ export async function getLiveRouteOptions() {
   return getJson(`${API_BASE_URL}/api/routes/live-options`);
 }
 
-export async function getPassengerJoinLink(room) {
-  const query = new URLSearchParams({ room: String(room || "") });
-  return getJson(`${API_BASE_URL}/api/pilot/passenger-link?${query.toString()}`);
-}
-
 export async function getAdminUsers(adminEmail, { includeInactive = true, limit = 500 } = {}) {
   const query = new URLSearchParams({
     include_inactive: includeInactive ? "true" : "false",
@@ -203,7 +229,7 @@ export async function deleteAdminUser(adminEmail, email) {
 
 export async function getTurbulenceAnalytics(
   adminEmail,
-  { maxCells = 900, gridDeg = 5, sinceMinutes = 360 } = {}
+  { maxCells = 400, gridDeg = 5, sinceMinutes = 120 } = {}
 ) {
   const query = new URLSearchParams({
     max_cells: String(maxCells),

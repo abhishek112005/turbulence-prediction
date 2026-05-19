@@ -1,68 +1,87 @@
+import { useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import HeroSection from "../components/landing/HeroSection";
+import ProblemSection from "../components/landing/ProblemSection";
+import SolutionPipeline from "../components/landing/SolutionPipeline";
+import LiveDemo from "../components/landing/LiveDemo";
+import ImpactComparison from "../components/landing/ImpactComparison";
+import RoleCards from "../components/landing/RoleCards";
+import CTASection from "../components/landing/CTASection";
+import LimitationsSection from "../components/landing/LimitationsSection";
 
 function roleToPath(role) {
-  if (role === "passenger") {
-    return "/passenger";
-  }
-  if (role === "pilot") {
-    return "/pilot";
-  }
-  if (role === "admin") {
-    return "/admin";
-  }
+  if (role === "pilot") return "/pilot";
+  if (role === "admin") return "/admin";
+  if (role === "passenger") return "/common-display";
   return "/";
 }
 
-function Landing() {
+export default function Landing() {
   const { isAuthenticated, user } = useAuth();
 
+  useEffect(() => {
+    if (window.location.hash) {
+      const id = window.location.hash.replace("#", "");
+      const target = document.getElementById(id);
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }
+  }, []);
+
   return (
-    <>
-      <section className="hero">
-        <h1>AI Flight Turbulence Prediction Dashboard</h1>
-        <p className="hero-subline">
-          Role-based portal for passengers, pilots, and flight operations teams.
-        </p>
-        <div className="insight-strip">
-          <span className="insight-pill">Live OpenSky tracking</span>
-          <span className="insight-pill">ML turbulence prediction</span>
-          <span className="insight-pill">Protected role-based access</span>
-        </div>
+    <div className="home-page">
+      <HeroSection
+        primaryHref={isAuthenticated ? roleToPath(user?.role) : "/common-display"}
+        primaryLabel={isAuthenticated ? "Explore Live System" : "Explore Live System"}
+        secondaryHref="#solution"
+        secondaryLabel="See How It Works"
+        isInternalPrimary
+      />
+
+      <ProblemSection />
+      <LimitationsSection />
+
+      <section className="home-section home-section--solution" id="solution">
+        <SolutionPipeline />
       </section>
 
-      <section className="panel landing-grid">
-        <article>
-          <h2>Passenger Portal</h2>
-          <p>View your flight status, route, and turbulence prediction snapshot.</p>
-        </article>
-        <article>
-          <h2>Pilot + Admin Portals</h2>
-          <p>Pilot gets operational flight details. Admin gets full fleet analytics.</p>
-        </article>
+      <section className="home-section">
+        <LiveDemo />
       </section>
 
-      <section className="panel">
-        <h2>{isAuthenticated ? "Continue" : "Start"}</h2>
-        <div className="toolbar">
-          {isAuthenticated ? (
-            <Link className="action-btn" to={roleToPath(user?.role)}>
-              Go to Dashboard
-            </Link>
-          ) : (
-            <>
-              <Link className="action-btn" to="/signup">
-                Signup with Role
-              </Link>
-              <Link className="action-btn muted" to="/login">
-                Login
-              </Link>
-            </>
-          )}
-        </div>
+      <section className="home-section">
+        <ImpactComparison />
       </section>
-    </>
+
+      <section className="home-section">
+        <RoleCards isAuthenticated={isAuthenticated} role={user?.role} />
+      </section>
+
+      <section className="home-section home-section--final-cta">
+        <CTASection
+          title="From reaction -> prediction"
+          description="Bring pilots, admins, and passengers onto one calmer timeline with earlier awareness and cleaner coordination."
+          actionHref={isAuthenticated ? roleToPath(user?.role) : "/common-display"}
+          actionLabel="View Live System"
+          isInternal
+        />
+      </section>
+
+      <footer className="home-footer">
+        <div>
+          <p className="home-footer__brand">Turbulence Prediction Platform</p>
+          <p className="home-footer__sub">
+            Real-time flight telemetry, predictive modeling, and shared alerting designed for high-clarity demos.
+          </p>
+        </div>
+        <div className="home-footer__links">
+          <Link to="/">Home</Link>
+          <Link to="/common-display">Live System</Link>
+          {!isAuthenticated ? <Link to="/login">Login</Link> : <Link to={roleToPath(user?.role)}>Dashboard</Link>}
+        </div>
+      </footer>
+    </div>
   );
 }
-
-export default Landing;

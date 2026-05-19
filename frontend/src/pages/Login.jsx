@@ -7,7 +7,7 @@ const GOOGLE_SCRIPT_ID = "google-identity-services";
 
 function roleToPath(role) {
   if (role === "passenger") {
-    return "/passenger";
+    return "/common-display";
   }
   if (role === "pilot") {
     return "/pilot";
@@ -94,30 +94,66 @@ function Login() {
   }
 
   return (
-    <section className="panel auth-card">
-      <h2>Login</h2>
-      <p>Please login with your google accoount!</p>
-
-      {googleClientId ? (
-        <div className="google-wrap">
-          <div ref={googleButtonRef} />
-          {!googleReady ? <p className="meta-line">Loading Google sign-in...</p> : null}
-        </div>
-      ) : (
-        <p className="error-line">
-          Missing <code>VITE_GOOGLE_CLIENT_ID</code>. Add it to use one-click Google login.
-        </p>
-      )}
-      <div className="toolbar">
-        <Link className="action-btn" to="/signup">
-          New user? Signup
-        </Link>
-        <Link className="action-btn muted" to="/">
-          Back to Landing
-        </Link>
+    <section className="auth-stage">
+      <div className="auth-stage__backdrop" aria-hidden="true">
+        <div className="auth-stage__orb auth-stage__orb--one" />
+        <div className="auth-stage__orb auth-stage__orb--two" />
       </div>
 
-      {error ? <p className="error-line">{error}</p> : null}
+      <div className="auth-layout">
+        <article className="auth-story glass-card">
+          <p className="auth-story__eyebrow">Secure Access</p>
+          <h1>Enter the turbulence control layer.</h1>
+          <p className="auth-story__lead">
+            Sign in once with Google and move directly into the role-specific system view designed for pilots, admins, and passengers.
+          </p>
+
+          <div className="auth-story__highlights">
+            <div className="auth-story__item">
+              <strong>Pilot</strong>
+              <span>Assigned flight monitoring and live alert controls.</span>
+            </div>
+            <div className="auth-story__item">
+              <strong>Admin</strong>
+              <span>System oversight, user management, and fleet analytics.</span>
+            </div>
+            <div className="auth-story__item">
+              <strong>Passenger</strong>
+              <span>Shared live display with prepared cabin-facing updates.</span>
+            </div>
+          </div>
+        </article>
+
+        <section className="panel auth-card auth-card--premium">
+          <p className="auth-card__eyebrow">Login</p>
+          <h2>Continue with Google</h2>
+          <p className="auth-card__copy">Use your authorized account to open the correct operational dashboard automatically.</p>
+
+          {googleClientId ? (
+            <div className="google-wrap auth-google-wrap">
+              <div className="auth-google-shell">
+                <div className="auth-google-button-host" ref={googleButtonRef} />
+              </div>
+              {!googleReady ? <p className="meta-line">Loading Google sign-in...</p> : null}
+            </div>
+          ) : (
+            <p className="error-line">
+              Missing <code>VITE_GOOGLE_CLIENT_ID</code>. Add it to use one-click Google login.
+            </p>
+          )}
+
+          <div className="toolbar auth-toolbar">
+            <Link className="action-btn auth-action-btn auth-action-btn--primary" to="/signup">
+              New user? Signup
+            </Link>
+            <Link className="action-btn auth-action-btn auth-action-btn--secondary" to="/">
+              Back to Landing
+            </Link>
+          </div>
+
+          {error ? <p className="error-line">{error}</p> : null}
+        </section>
+      </div>
     </section>
   );
 }

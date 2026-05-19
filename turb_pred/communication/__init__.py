@@ -1,3 +1,1 @@
-from communication.websocket_routes import router
-
-__all__ = ["router"]
+"""Communication utilities for persisted alert records."""

@@ -1,68 +1,42 @@
 import joblib
+import logging
 import math
+import asyncio
 import numpy as np
 import os
 import pandas as pd
 import requests
-import secrets
-from collections import defaultdict
+import time
 import json
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from agents_pirep.validation_agent import PIREPValidationAgent
 from api.auth import get_access_token
 from communication.alerts import dispatch_alert, ensure_alerts_table
-from communication.websocket_routes import router as communication_router
 from config.settings import AVIATIONSTACK_ACCESS_KEY, AVIATIONSTACK_BASE_URL
 from database.db_connection import get_connection
+from database.sqlalchemy import Base, SessionLocal, engine
 from database.insert_planes import insert_planes
+from models.db_models import User
 from predictions.predict_live import insert_predictions
 from preprocessing.feature_engineering import clean_dataframe
+from routes.admin_assignments import router as admin_assignment_router
+from routes.pilot_flights import router as pilot_flights_router
+from services.auth_service import verify_google_token_and_get_email
+from services.pilot_assignment_service import PilotAssignmentService
+from utils.security import create_access_token, resolve_request_identity
 
-
-class RoomManager:
-    def __init__(self):
-        self.rooms = defaultdict(set)
-        self.last_level = {}
-
-    async def connect(self, websocket: WebSocket, room_code: str):
-        await websocket.accept()
-        self.rooms[room_code].add(websocket)
-
-    def disconnect(self, websocket: WebSocket, room_code: str):
-        self.rooms[room_code].discard(websocket)
-
-    async def broadcast(self, room_code: str, payload: dict):
-        if not self.rooms[room_code]:
-            return {"sent": 0, "skipped": False}
-        level = payload.get("t")
-        if self.last_level.get(room_code) == level:
-            return {"sent": 0, "skipped": True}
-        self.last_level[room_code] = level
-        message = json.dumps(payload)
-        dead = set()
-        for websocket in list(self.rooms[room_code]):
-            try:
-                await websocket.send_text(message)
-            except Exception:
-                dead.add(websocket)
-        self.rooms[room_code] -= dead
-        return {"sent": len(self.rooms[room_code]), "skipped": False}
-
-    def get_status(self, room_code: str):
-        return {
-            "connected": len(self.rooms[room_code]),
-            "last_level": self.last_level.get(room_code),
-        }
-
-
-room_manager = RoomManager()
 ROUTE_CACHE = {}
 ROUTE_CACHE_TTL_SECONDS = 300
+TABLE_COLUMNS_CACHE = {}
+TABLE_COLUMNS_CACHE_TTL_SECONDS = 300
+ADMIN_ANALYTICS_CACHE = {}
+ADMIN_ANALYTICS_CACHE_TTL_SECONDS = 120
 PROVIDER_BACKOFF_UNTIL = None
 _LAST_AVIATIONSTACK_KEY = None
 OPENSKY_BACKOFF_UNTIL = None
@@ -84,6 +58,7 @@ FUTURE_MODEL_PATH = "future_turbulence_model.pkl"
 BASE_DIR = Path(__file__).resolve().parents[1]
 FRONTEND_DIST_DIR = BASE_DIR.parent / "frontend" / "dist"
 FRONTEND_INDEX_FILE = FRONTEND_DIST_DIR / "index.html"
+logger = logging.getLogger(__name__)
 
 
 def load_allowed_origins():
@@ -98,9 +73,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(communication_router)
 
 ensure_alerts_table()
+Base.metadata.create_all(bind=engine)
+app.include_router(pilot_flights_router)
+app.include_router(admin_assignment_router)
 
 if FRONTEND_DIST_DIR.exists():
     assets_dir = FRONTEND_DIST_DIR / "assets"
@@ -109,6 +86,36 @@ if FRONTEND_DIST_DIR.exists():
 
 _current_model = None
 _future_model = None
+
+
+class SharedDisplayHub:
+    def __init__(self):
+        self.latest_payload = None
+        self.subscribers = set()
+
+    async def publish(self, payload: dict):
+        self.latest_payload = payload
+        dead = set()
+        for queue in list(self.subscribers):
+            try:
+                await queue.put(payload)
+            except Exception:
+                dead.add(queue)
+        self.subscribers -= dead
+
+    def subscribe(self):
+        queue = asyncio.Queue()
+        self.subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue):
+        self.subscribers.discard(queue)
+
+    def current(self):
+        return self.latest_payload
+
+
+shared_display_hub = SharedDisplayHub()
 
 
 class GoogleAuthRequest(BaseModel):
@@ -123,6 +130,23 @@ class GoogleSignupRequest(BaseModel):
 class PilotFlightAssignmentRequest(BaseModel):
     pilot_email: str
     icao24: str
+
+
+class SharedDisplayPublishRequest(BaseModel):
+    icao24: str
+    callsign: str = ""
+    current_level: int = 0
+    predicted_level: int = 0
+    confidence: float | None = None
+    message: str = ""
+    action: str = ""
+    route: str = ""
+    source: str = "pilot-dashboard"
+    published_at: str | None = None
+    announcement: str = ""
+    announcement_token: str = ""
+    alarm_type: str = ""
+    alarm_token: str = ""
 
 
 def get_models():
@@ -190,6 +214,32 @@ def fetch_recent_rows_for_icao24(icao24, limit=200):
     return pd.DataFrame(rows, columns=columns)
 
 
+def fetch_stored_prediction_level(icao24: str) -> int | None:
+    """Return the most recently stored prediction level (0-3) for an icao24, or None."""
+    normalized = normalize_icao24(icao24)
+    pred_cols = get_table_columns("predictions")
+    level_col = "predicted_turbulence" if "predicted_turbulence" in pred_cols else "prediction"
+    if level_col not in pred_cols:
+        return None
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        SELECT {level_col}
+        FROM predictions
+        WHERE LOWER(icao24) = LOWER(%s)
+        LIMIT 1;
+        """,
+        (normalized,),
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    if row and row[0] is not None:
+        return int(row[0])
+    return None
+
+
 def fetch_latest_db_state_for_icao24(icao24):
     df = fetch_recent_rows_for_icao24(icao24, limit=1)
     if df.empty:
@@ -250,6 +300,18 @@ def fetch_direct_opensky_state(icao24):
 
     parsed["fetched_at"] = fetched_at
     return parsed
+
+
+def get_flight_state(icao24):
+    normalized_icao24 = normalize_icao24(icao24)
+    try:
+        state = fetch_direct_opensky_state(normalized_icao24)
+        if state is not None:
+            return state
+    except Exception as exc:
+        logger.warning("Falling back to DB state for %s after OpenSky fetch error: %s", normalized_icao24, exc)
+
+    return fetch_latest_db_state_for_icao24(normalized_icao24)
 
 
 def lookup_user_role(email):
@@ -315,6 +377,11 @@ def upsert_user(email, role, is_active=True):
 
 
 def get_table_columns(table_name: str):
+    cache_entry = TABLE_COLUMNS_CACHE.get(table_name)
+    now = time.monotonic()
+    if cache_entry and now - cache_entry["captured_at"] < TABLE_COLUMNS_CACHE_TTL_SECONDS:
+        return cache_entry["columns"]
+
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -329,13 +396,14 @@ def get_table_columns(table_name: str):
     cols = {row[0] for row in cursor.fetchall()}
     cursor.close()
     conn.close()
+    TABLE_COLUMNS_CACHE[table_name] = {"columns": cols, "captured_at": now}
     return cols
 
 
 def require_admin(request: Request):
-    email = (request.headers.get("x-user-email") or "").strip().lower()
+    email, _ = resolve_request_identity(request)
     if not email:
-        raise HTTPException(status_code=401, detail="Missing X-User-Email header.")
+        raise HTTPException(status_code=401, detail="Authentication required.")
 
     user = lookup_user(email)
     if not user or not user.get("is_active") or user.get("role") != "admin":
@@ -344,122 +412,62 @@ def require_admin(request: Request):
     return email
 
 
+def require_pilot(request: Request):
+    email, _ = resolve_request_identity(request)
+    if not email:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    user = lookup_user(email)
+    if not user or not user.get("is_active") or user.get("role") != "pilot":
+        raise HTTPException(status_code=403, detail="Pilot access required.")
+
+    return email
+
+
 def normalize_icao24(icao24):
     return str(icao24 or "").strip().lower()
 
 
+def level_text(level: int):
+    if level >= 3:
+        return "Severe"
+    if level >= 2:
+        return "Moderate"
+    if level >= 1:
+        return "Light"
+    return "Calm"
+
+
 def ensure_pilot_assignment_table():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS pilot_flight_assignments (
-            pilot_email TEXT PRIMARY KEY,
-            icao24 VARCHAR(32) NOT NULL,
-            callsign TEXT,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
+    Base.metadata.create_all(bind=engine)
 
 
 def upsert_pilot_assignment(pilot_email, icao24, callsign=""):
     ensure_pilot_assignment_table()
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO pilot_flight_assignments (pilot_email, icao24, callsign, updated_at)
-        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-        ON CONFLICT (pilot_email)
-        DO UPDATE SET
-            icao24 = EXCLUDED.icao24,
-            callsign = EXCLUDED.callsign,
-            updated_at = CURRENT_TIMESTAMP;
-        """,
-        (pilot_email, normalize_icao24(icao24), (callsign or "").strip()),
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
+    db = SessionLocal()
+    try:
+        service = PilotAssignmentService(db)
+        service.assign_aircraft(pilot_email, icao24)
+    finally:
+        db.close()
 
 
 def get_pilot_assignment(pilot_email):
     ensure_pilot_assignment_table()
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT pilot_email, icao24, callsign, updated_at
-        FROM pilot_flight_assignments
-        WHERE LOWER(pilot_email) = LOWER(%s)
-        LIMIT 1;
-        """,
-        (pilot_email,),
-    )
-    row = cursor.fetchone()
-    cursor.close()
-    conn.close()
-
-    if not row:
-        return None
-
-    return {
-        "pilotEmail": row[0],
-        "icao24": row[1],
-        "callsign": (row[2] or "").strip(),
-        "updatedAt": row[3].isoformat() if row[3] else None,
-    }
-
-
-def list_pilot_assignments():
-    ensure_pilot_assignment_table()
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT pilot_email, icao24, callsign, updated_at
-        FROM pilot_flight_assignments
-        ORDER BY updated_at DESC;
-        """
-    )
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-
-    assignments = []
-    for row in rows:
-        assignments.append(
-            {
-                "pilotEmail": row[0],
-                "icao24": row[1],
-                "callsign": (row[2] or "").strip(),
-                "updatedAt": row[3].isoformat() if row[3] else None,
-            }
-        )
-    return assignments
-
-
-def verify_google_token_and_get_email(token):
-    verify_response = requests.get(
-        "https://oauth2.googleapis.com/tokeninfo",
-        params={"id_token": token},
-        timeout=20,
-    )
-
-    if verify_response.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid Google token.")
-
-    token_info = verify_response.json()
-    email = token_info.get("email")
-
-    if not email:
-        raise HTTPException(status_code=401, detail="Google token missing email.")
-
-    return email
+    db = SessionLocal()
+    try:
+        pilot = db.query(User).filter(User.email.ilike(pilot_email), User.role == "pilot").first()
+        if not pilot or not pilot.pilot_aircraft_map:
+            return None
+        mapping = pilot.pilot_aircraft_map
+        return {
+            "pilotEmail": pilot.email,
+            "icao24": mapping.icao24,
+            "callsign": "",
+            "updatedAt": mapping.updated_at.isoformat() if mapping.updated_at else None,
+        }
+    finally:
+        db.close()
 
 
 def opensky_get(url, params=None):
@@ -949,7 +957,7 @@ def build_inference_features(df):
     return enriched
 
 
-def run_live_pipeline(db_limit=5000, display_limit=120, fetch_live=True):
+def run_live_pipeline(db_limit=5000, display_limit=120, fetch_live=True, persist_predictions=True):
     live_count = 0
     live_fetch_status = "skipped"
     if fetch_live:
@@ -1011,10 +1019,11 @@ def run_live_pipeline(db_limit=5000, display_limit=120, fetch_live=True):
         .sort_values("fetched_at", ascending=False)
     )
 
-    insert_predictions(latest_per_icao[["icao24", "prediction", "confidence"]])
-    alert_payload = build_turbulence_alert_payload(latest_per_icao)
-    if alert_payload:
-        dispatch_alert(alert_payload, dedupe_seconds=45)
+    if persist_predictions:
+        insert_predictions(latest_per_icao[["icao24", "prediction", "confidence"]])
+        alert_payload = build_turbulence_alert_payload(latest_per_icao)
+        if alert_payload:
+            dispatch_alert(alert_payload, dedupe_seconds=45)
 
     display_df = latest_per_icao.head(display_limit).copy()
 
@@ -1044,6 +1053,7 @@ def run_live_pipeline(db_limit=5000, display_limit=120, fetch_live=True):
             "futureModelName": "future_turbulence_model.pkl",
             "liveStatesFetched": int(live_count),
             "liveFetchStatus": live_fetch_status,
+            "predictionsPersisted": bool(persist_predictions),
         },
         "turbulenceSplit": summarize_levels(latest_per_icao["prediction"]),
         "futureRisk": build_future_risk(latest_per_icao),
@@ -1155,11 +1165,42 @@ def get_flight_payload(icao24, db_limit=5000):
     }
 
 
-def build_flight_lookup(flights):
-    lookup = {}
-    for flight in flights or []:
-        lookup[normalize_icao24(flight.get("icao24"))] = flight
-    return lookup
+def build_features(icao24, history_limit=20):
+    normalized_icao24 = normalize_icao24(icao24)
+    raw_df = fetch_recent_rows_for_icao24(normalized_icao24, limit=history_limit)
+    direct_state = None
+
+    try:
+        direct_state = fetch_direct_opensky_state(normalized_icao24)
+    except Exception as exc:
+        logger.warning("Validation feature builder could not fetch direct state for %s: %s", normalized_icao24, exc)
+
+    if direct_state is not None:
+        raw_df = pd.concat([pd.DataFrame([direct_state]), raw_df], ignore_index=True, sort=False)
+
+    if raw_df.empty:
+        raise ValueError(f"No telemetry history available for ICAO24 '{normalized_icao24}'.")
+
+    processed_df = clean_dataframe(raw_df)
+    processed_df = build_inference_features(processed_df)
+
+    if processed_df.empty:
+        raise ValueError(f"No usable feature rows available for ICAO24 '{normalized_icao24}'.")
+
+    model, _ = get_models()
+    feature_names = list(getattr(model, "feature_names_in_", FEATURE_COLUMNS))
+
+    for feature in feature_names:
+        if feature not in processed_df.columns:
+            processed_df[feature] = 0.0
+        processed_df[feature] = pd.to_numeric(processed_df[feature], errors="coerce").fillna(0.0)
+
+    latest_row = (
+        processed_df.sort_values("fetched_at")
+        .groupby("icao24", as_index=False)
+        .tail(1)
+    )
+    return latest_row[feature_names]
 
 
 @app.get("/health")
@@ -1167,24 +1208,30 @@ def health():
     return {"status": "ok"}
 
 
-@app.websocket("/ws/{room_code}")
-async def websocket_endpoint(websocket: WebSocket, room_code: str):
-    await room_manager.connect(websocket, room_code)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        room_manager.disconnect(websocket, room_code)
+@app.get("/api/shared-display/current")
+def get_shared_display_current():
+    return {"update": shared_display_hub.current()}
 
 
-@app.post("/api/alerts/broadcast/{room_code}")
-async def broadcast_alert(room_code: str, payload: dict):
-    return await room_manager.broadcast(room_code, payload)
+@app.get("/api/shared-display/stream")
+async def stream_shared_display():
+    async def event_generator():
+        queue = shared_display_hub.subscribe()
+        try:
+            current = shared_display_hub.current()
+            if current is not None:
+                yield f"data: {json.dumps(current)}\n\n"
 
+            while True:
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=20)
+                    yield f"data: {json.dumps(payload)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+        finally:
+            shared_display_hub.unsubscribe(queue)
 
-@app.get("/api/rooms/{room_code}/status")
-async def room_status(room_code: str):
-    return room_manager.get_status(room_code)
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/api/auth/google")
@@ -1202,7 +1249,7 @@ def auth_google(payload: GoogleAuthRequest):
             detail="User is not authorized. Ask admin to add your email in users table.",
         )
 
-    app_token = secrets.token_urlsafe(32)
+    app_token = create_access_token(email=email, role=role)
     return {
         "email": email,
         "role": role,
@@ -1230,7 +1277,7 @@ def auth_google_signup(payload: GoogleSignupRequest):
         upsert_user(email, role, True)
         assigned_role = role
 
-    app_token = secrets.token_urlsafe(32)
+    app_token = create_access_token(email=email, role=assigned_role)
     return {
         "email": email,
         "role": assigned_role,
@@ -1391,6 +1438,11 @@ def admin_turbulence_analytics(
     max_cells = max(50, min(int(max_cells or 900), 2500))
     grid_deg = max(1, min(int(grid_deg or 5), 15))
     since_minutes = max(0, min(int(since_minutes or 0), 7 * 24 * 60))
+    cache_key = (max_cells, grid_deg, since_minutes)
+    cache_entry = ADMIN_ANALYTICS_CACHE.get(cache_key)
+    now = time.monotonic()
+    if cache_entry and now - cache_entry["captured_at"] < ADMIN_ANALYTICS_CACHE_TTL_SECONDS:
+        return cache_entry["payload"]
 
     pred_cols = get_table_columns("predictions")
     if not pred_cols:
@@ -1431,6 +1483,7 @@ def admin_turbulence_analytics(
     where_sql = f"WHERE {' AND '.join(where_terms)}" if where_terms else ""
 
     fetch_limit = min(12000, max(2500, max_cells * 20))
+    state_hours = max(6, min(48, math.ceil(since_minutes / 60) + 6)) if since_minutes else 12
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -1454,7 +1507,9 @@ def admin_turbulence_analytics(
                 origin_country,
                 fetched_at
             FROM planes_table
-            WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+            WHERE latitude IS NOT NULL
+              AND longitude IS NOT NULL
+              AND fetched_at >= NOW() - INTERVAL '{int(state_hours)} hours'
             ORDER BY LOWER(icao24), fetched_at DESC
         )
         SELECT
@@ -1574,7 +1629,7 @@ def admin_turbulence_analytics(
         )
     continent_stats = sorted(continent_stats, key=lambda item: item["count"], reverse=True)
 
-    return {
+    payload = {
         "gridDeg": grid_deg,
         "cells": cells,
         "levelSplit": [
@@ -1588,12 +1643,18 @@ def admin_turbulence_analytics(
         "source": "db",
         "fetchedAt": pd.Timestamp.utcnow().isoformat(),
     }
+    ADMIN_ANALYTICS_CACHE[cache_key] = {"payload": payload, "captured_at": now}
+    return payload
 
 
 @app.post("/api/pipeline/run-live")
-def run_pipeline(db_limit: int = 5000, display_limit: int = 120):
+def run_pipeline(db_limit: int = 5000, display_limit: int = 120, persist_predictions: bool = True):
     try:
-        return run_live_pipeline(db_limit=db_limit, display_limit=display_limit)
+        return run_live_pipeline(
+            db_limit=db_limit,
+            display_limit=display_limit,
+            persist_predictions=persist_predictions,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1608,8 +1669,33 @@ def run_flight_pipeline(icao24: str, db_limit: int = 5000):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/pirep-validate/{icao24}")
+def validate_with_pirep(icao24: str, current_level: int | None = None):
+    try:
+        model, _ = get_models()
+        agent = PIREPValidationAgent.from_dependencies(
+            get_flight_state=get_flight_state,
+            build_features=build_features,
+            model=model,
+        )
+        # Prefer the level sent by the frontend (matches what the pilot sees on screen).
+        # Fall back to the DB-stored value, and finally re-run the model.
+        level = current_level if current_level is not None else fetch_stored_prediction_level(icao24)
+        return agent.run(icao24, stored_predicted_level=level)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        raise HTTPException(status_code=status_code, detail=f"NOAA PIREP request failed: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/pilot/assign-flight")
-def assign_pilot_flight(payload: PilotFlightAssignmentRequest):
+def assign_pilot_flight(payload: PilotFlightAssignmentRequest, request: Request):
+    require_admin(request)
     pilot_email = (payload.pilot_email or "").strip().lower()
     icao24 = normalize_icao24(payload.icao24)
 
@@ -1624,18 +1710,63 @@ def assign_pilot_flight(payload: PilotFlightAssignmentRequest):
 
     flight_payload = get_flight_payload(icao24=icao24)
     selected_flight = flight_payload["flight"]
-    upsert_pilot_assignment(
-        pilot_email=pilot_email,
-        icao24=selected_flight["icao24"],
-        callsign=selected_flight.get("callsign", ""),
-    )
-
-    assignment = get_pilot_assignment(pilot_email)
+    db = SessionLocal()
+    try:
+        service = PilotAssignmentService(db)
+        mapping = service.assign_aircraft(pilot_email=pilot_email, icao24=selected_flight["icao24"])
+        assignment = {
+            "pilotEmail": pilot_email,
+            "icao24": mapping.icao24,
+            "callsign": selected_flight.get("callsign", ""),
+            "updatedAt": mapping.updated_at.isoformat() if mapping.updated_at else None,
+        }
+    finally:
+        db.close()
     return {
-        "message": "Pilot flight assignment saved.",
+        "message": "Pilot-aircraft mapping saved. The pilot can now auto-detect flights.",
         "assignment": assignment,
         "flight": selected_flight,
     }
+
+
+@app.post("/api/shared-display/publish")
+async def publish_shared_display(payload: SharedDisplayPublishRequest, request: Request):
+    pilot_email = require_pilot(request)
+    assignment = get_pilot_assignment(pilot_email)
+    normalized_icao24 = normalize_icao24(payload.icao24)
+
+    if not assignment or normalize_icao24(assignment.get("icao24")) != normalized_icao24:
+        raise HTTPException(status_code=403, detail="You can only share updates for your assigned flight.")
+
+    shared_payload = {
+        "pilotEmail": pilot_email,
+        "icao24": normalized_icao24,
+        "callsign": (payload.callsign or assignment.get("callsign") or "").strip() or "N/A",
+        "currentLevel": max(0, min(int(payload.current_level or 0), 3)),
+        "predictedLevel": max(0, min(int(payload.predicted_level or 0), 3)),
+        "confidence": float(payload.confidence) if payload.confidence is not None else None,
+        "message": (payload.message or "").strip(),
+        "action": (payload.action or "").strip(),
+        "route": (payload.route or "").strip(),
+        "source": (payload.source or "pilot-dashboard").strip(),
+        "publishedAt": payload.published_at or pd.Timestamp.utcnow().isoformat(),
+        "announcement": (payload.announcement or "").strip(),
+        "announcementToken": (payload.announcement_token or "").strip(),
+        "alarmType": (payload.alarm_type or "").strip(),
+        "alarmToken": (payload.alarm_token or "").strip(),
+    }
+
+    dispatch_alert(
+        {
+            "type": "shared_display",
+            "severity": level_text(shared_payload["predictedLevel"]),
+            "message": shared_payload["message"] or "Pilot pushed a shared turbulence update.",
+            "flight_id": normalized_icao24,
+        },
+        dedupe_seconds=0,
+    )
+    await shared_display_hub.publish(shared_payload)
+    return {"message": "Shared display updated.", "update": shared_payload}
 
 
 @app.get("/api/pilot/assign-flight/{pilot_email}")
@@ -1644,58 +1775,6 @@ def fetch_pilot_flight_assignment(pilot_email: str):
     if not assignment:
         return {"assignment": None}
     return {"assignment": assignment}
-
-
-@app.get("/api/pilot/shared-flights")
-def fetch_shared_pilot_flights():
-    assignments = list_pilot_assignments()
-    if not assignments:
-        return {"sharedFlights": []}
-
-    # This endpoint is hit frequently by passengers; do not perform a live OpenSky fetch here.
-    pipeline_payload = run_live_pipeline(db_limit=5000, display_limit=5000, fetch_live=False)
-    flight_lookup = build_flight_lookup(pipeline_payload.get("flights"))
-    shared_flights = []
-
-    for assignment in assignments:
-        flight = flight_lookup.get(normalize_icao24(assignment["icao24"]))
-        source = pipeline_payload.get("source")
-        fetched_at = pipeline_payload.get("fetchedAt")
-        route = None
-
-        if not flight:
-            try:
-                fallback_payload = get_latest_known_flight_payload(assignment["icao24"])
-                flight = fallback_payload.get("flight")
-                source = fallback_payload.get("source")
-                fetched_at = fallback_payload.get("fetchedAt")
-            except HTTPException:
-                flight = None
-
-        callsign = ""
-        if flight:
-            callsign = str(flight.get("callsign") or "").strip()
-        if not callsign:
-            callsign = str(assignment.get("callsign") or "").strip()
-        if callsign and callsign != "N/A":
-            try:
-                route = get_cached_route_by_callsign(callsign)
-            except HTTPException:
-                route = None
-            except Exception:
-                route = None
-
-        shared_flights.append(
-            {
-                **assignment,
-                "flight": flight,
-                "route": route,
-                "fetchedAt": fetched_at,
-                "source": source,
-            }
-        )
-
-    return {"sharedFlights": shared_flights}
 
 
 @app.get("/api/opensky/flights/departure")

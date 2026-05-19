@@ -1,16 +1,5 @@
 import RiskBadge from "./RiskBadge";
 
-function formatRoute(routeData) {
-  const dep = routeData?.departure || null;
-  const arr = routeData?.arrival || null;
-  const from = dep?.icao || dep?.iata || dep?.name || dep?.city || "";
-  const to = arr?.icao || arr?.iata || arr?.name || arr?.city || "";
-  if (!from && !to) {
-    return "N/A";
-  }
-  return `${from || "Unknown"} -> ${to || "Unknown"}`;
-}
-
 function formatTimestamp(timestamp) {
   if (!timestamp) {
     return "N/A";
@@ -22,7 +11,7 @@ function formatTimestamp(timestamp) {
   return date.toLocaleString();
 }
 
-function FlightPredictionTable({ flight, fetchedAt, routeData }) {
+function FlightPredictionTable({ flight, fetchedAt }) {
   if (!flight) {
     return (
       <section className="panel">
@@ -44,7 +33,6 @@ function FlightPredictionTable({ flight, fetchedAt, routeData }) {
             <tr>
               <th>Flight ID (ICAO24)</th>
               <th>Callsign</th>
-              <th>Route</th>
               <th>Current Turbulence</th>
               <th>Predicted Turbulence</th>
               <th>Confidence</th>
@@ -55,7 +43,6 @@ function FlightPredictionTable({ flight, fetchedAt, routeData }) {
             <tr>
               <td>{flight.icao24 || "N/A"}</td>
               <td>{(flight.callsign || "N/A").trim() || "N/A"}</td>
-              <td>{formatRoute(routeData)}</td>
               <td>
                 <RiskBadge level={Number(flight.currentLevel ?? 0)} />
               </td>

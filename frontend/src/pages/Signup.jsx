@@ -7,7 +7,7 @@ const GOOGLE_SCRIPT_ID = "google-identity-services-signup";
 
 function roleToPath(role) {
   if (role === "passenger") {
-    return "/passenger";
+    return "/common-display";
   }
   if (role === "pilot") {
     return "/pilot";
@@ -95,41 +95,69 @@ function Signup() {
   }
 
   return (
-    <section className="panel auth-card">
-      <h2>Signup</h2>
-      <p>Select your role, then continue with Google OAuth.</p>
-
-      <label className="field-label" htmlFor="role-select">
-        Role
-      </label>
-      <select
-        id="role-select"
-        className="input"
-        value={selectedRole}
-        onChange={(event) => setSelectedRole(event.target.value)}
-      >
-        <option value="passenger">Passenger</option>
-        <option value="pilot">Pilot</option>
-        <option value="admin">Admin</option>
-      </select>
-
-      {googleClientId ? (
-        <div className="google-wrap">
-          <div ref={googleButtonRef} />
-          {!googleReady ? <p className="meta-line">Loading Google sign-up...</p> : null}
-        </div>
-      ) : (
-        <p className="error-line">
-          Missing <code>VITE_GOOGLE_CLIENT_ID</code>. Add it to use one-click Google signup.
-        </p>
-      )}
-      <div className="toolbar">
-        <Link className="action-btn muted" to="/login">
-          Already have account? Login
-        </Link>
+    <section className="auth-stage">
+      <div className="auth-stage__backdrop" aria-hidden="true">
+        <div className="auth-stage__orb auth-stage__orb--one" />
+        <div className="auth-stage__orb auth-stage__orb--two" />
       </div>
 
-      {error ? <p className="error-line">{error}</p> : null}
+      <div className="auth-layout">
+        <article className="auth-story glass-card">
+          <p className="auth-story__eyebrow">Role Setup</p>
+          <h1>Choose the view you belong to.</h1>
+          <p className="auth-story__lead">
+            The platform stays one system underneath, but each role enters with a different responsibility and a cleaner interface.
+          </p>
+
+          <div className="auth-role-preview">
+            <div className={`auth-role-pill ${selectedRole === "passenger" ? "active" : ""}`}>Passenger</div>
+            <div className={`auth-role-pill ${selectedRole === "pilot" ? "active" : ""}`}>Pilot</div>
+            <div className={`auth-role-pill ${selectedRole === "admin" ? "active" : ""}`}>Admin</div>
+          </div>
+        </article>
+
+        <section className="panel auth-card auth-card--premium">
+          <p className="auth-card__eyebrow">Signup</p>
+          <h2>Create your access</h2>
+          <p className="auth-card__copy">Select your role, then continue with Google OAuth.</p>
+
+          <label className="field-label auth-field-label" htmlFor="role-select">
+            Role
+          </label>
+          <div className="auth-select-shell">
+            <select
+              id="role-select"
+              className="input auth-input auth-select"
+              value={selectedRole}
+              onChange={(event) => setSelectedRole(event.target.value)}
+            >
+              <option value="passenger">Passenger</option>
+              <option value="pilot">Pilot</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+
+          {googleClientId ? (
+            <div className="google-wrap auth-google-wrap">
+              <div className="auth-google-shell">
+                <div className="auth-google-button-host" ref={googleButtonRef} />
+              </div>
+              {!googleReady ? <p className="meta-line">Loading Google sign-up...</p> : null}
+            </div>
+          ) : (
+            <p className="error-line">
+              Missing <code>VITE_GOOGLE_CLIENT_ID</code>. Add it to use one-click Google signup.
+            </p>
+          )}
+          <div className="toolbar auth-toolbar">
+            <Link className="action-btn auth-action-btn auth-action-btn--secondary" to="/login">
+              Already have account? Login
+            </Link>
+          </div>
+
+          {error ? <p className="error-line">{error}</p> : null}
+        </section>
+      </div>
     </section>
   );
 }

@@ -1,10 +1,6 @@
-import asyncio
-import os
 import time
 
 from database.db_connection import get_connection
-
-from communication.connection_manager import passenger_connection_manager
 
 
 _RECENT_ALERTS: dict[tuple[str, str, str, str], float] = {}
@@ -64,15 +60,6 @@ def should_emit_alert(payload, dedupe_seconds):
     _RECENT_ALERTS[key] = now
     return True
 
-
-async def broadcast_alert(payload):
-    # Safety: by default, do not broadcast globally to all passengers.
-    # Room-specific passenger alerts are handled via `/ws/{room}` in the pipeline API.
-    if os.getenv("ENABLE_GLOBAL_PASSENGER_ALERTS", "").strip() not in {"1", "true", "TRUE", "yes", "YES"}:
-        return
-    await passenger_connection_manager.broadcast(payload)
-
-
 def dispatch_alert(payload, dedupe_seconds=0):
     if not should_emit_alert(payload, dedupe_seconds):
         return False
@@ -83,12 +70,5 @@ def dispatch_alert(payload, dedupe_seconds=0):
         message=payload.get("message") or "",
         flight_id=payload.get("flight_id"),
     )
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.run(broadcast_alert(payload))
-    else:
-        loop.create_task(broadcast_alert(payload))
 
     return True
